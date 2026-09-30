@@ -200,7 +200,8 @@ aws cloudfront create-origin-access-control \
 
 ```bash
 # distribution-config.jsonを作成
-cat << 'EOF' > /tmp/distribution-config.json
+# 引用符なしのEOFにすること('EOF'だと$(date)が展開されない)
+cat << EOF > /tmp/distribution-config.json
 {
   "CallerReference": "initial-$(date +%s)",
   "Origins": {
@@ -295,6 +296,8 @@ aws s3api put-bucket-policy \
 
 ## 5. GitHub ActionsによるOIDC認証の設定
 
+> 4〜5章のAWSリソースは、[一括作成スクリプト](scripts/aws-setup.sh)でまとめて作成できる（AWS CloudShell推奨）。先頭の変数を編集して実行し、最後に出力される4行（バケット名・Distribution ID・ドメイン・ロールARN）を控える。
+
 ### 5.1 OIDCプロバイダーの作成（AWSアカウントで初回のみ）
 
 ```bash
@@ -333,6 +336,7 @@ cat << 'EOF' > /tmp/trust-policy.json
 EOF
 
 # <AWS_ACCOUNT_ID>, <owner>, <repo>を置換してから実行
+# ※ 新しいリポジトリではsubの形式が異なる場合がある。5.5を参照
 aws iam create-role \
   --role-name github-actions-<repo>-deploy \
   --assume-role-policy-document file:///tmp/trust-policy.json
@@ -382,6 +386,49 @@ aws iam put-role-policy \
 gh secret set AWS_ROLE_ARN -R <owner>/<repo>
 # 値: arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-<repo>-deploy
 ```
+
+### 5.5 トラブルシューティング
+
+#### `Not authorized to perform sts:AssumeRoleWithWebIdentity`
+
+信頼ポリシーの `sub` がGitHubが実際に送る値と一致していない。新しいリポジトリでは `sub` が既定で次の形式になる場合がある。
+
+- 想定: `repo:<owner>/<repo>:ref:refs/heads/main`
+- 実際: `repo:<owner>@<ownerID>/<repo>@<repoID>:ref:refs/heads/main`
+
+実際の値は、一時的に次のステップを `configure-aws-credentials` の前に追加して確認する（原因特定後に削除する）。
+
+```yaml
+      - name: Debug OIDC claims
+        run: |
+          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | { read p; echo "${p}==" | base64 -d 2>/dev/null; } | jq '{sub, aud, ref, repository, iss}'
+```
+
+表示された `sub` で信頼ポリシーを更新する。
+
+```bash
+aws iam update-assume-role-policy --role-name github-actions-<repo>-deploy \
+  --policy-document file://trust-policy.json   # subを実際の値に書き換えたもの
+```
+
+それでも失敗する場合の確認項目:
+- シークレット `AWS_ROLE_ARN` がロールの実ARNと完全一致しているか（前後の空白・改行に注意。入れ直すのが確実）
+- IAMのIDプロバイダー `token.actions.githubusercontent.com` の対象者に `sts.amazonaws.com` があるか
+- 失敗した実行が `main` ブランチのものか（信頼ポリシーは `main` のみ許可）
+
+#### `AccessDenied ... s3:ListBucket ... no identity-based policy allows`
+
+ロールにデプロイ用ポリシー（5.3の `DeployToS3`）が付いていない。ロール作成後にスクリプトが止まっていた場合に起こる。次で確認・付与する。
+
+```bash
+aws iam get-role-policy --role-name github-actions-<repo>-deploy --policy-name DeployToS3
+# NoSuchEntityなら5.3を実行
+```
+
+#### デプロイ成功後、CloudFrontのURLが403になる
+
+S3バケットポリシー（4.4）が未設定。`aws s3api get-bucket-policy --bucket <bucket>` で確認する。
 
 ---
 
