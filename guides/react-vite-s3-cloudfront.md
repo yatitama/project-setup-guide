@@ -94,6 +94,7 @@ mainブランチへのpushで自動デプロイ（AWS S3 + CloudFront）
 
 ## 重要なルール
 - **毎回の応答の末尾に、コンテキストウィンドウの残量（使用率）を表示すること。**
+- **手元の Claude Code で作業するときは、メインのコンテキストを小さく保つため、リポジトリの検索とテスト実行は Haiku のサブエージェントに任せる**（`.claude/agents/` の search＝全体像、grep＝呼び出し箇所、audit＝diff の確認とビルド・テスト）。メインは結果の要約だけを受け取る。
 ```
 
 ### 2.3 .gitignore
@@ -106,6 +107,83 @@ dist
 *.log
 .DS_Store
 ```
+
+### 2.4 Claude Code のモデルとサブエージェント
+
+メインは Sonnet、アドバイザーは Opus、検索・呼び出し箇所・diff の確認は Haiku のサブエージェントに任せる構成。
+
+`.claude/settings.json`
+
+````json
+{
+  "model": "sonnet",
+  "advisorModel": "opus"
+}
+````
+
+`.claude/agents/search.md`
+
+````markdown
+---
+name: search
+description: リポジトリの全体像を読み取り専用で調べる。どこに何があるか、関係するファイルや文書を知りたいときに使う。
+tools: Read, Grep, Glob
+model: haiku
+---
+
+リポジトリを読み取り専用で調べ、頼まれた事柄の全体像を報告する。
+
+- 最初に CLAUDE.md と、そこに名前が出ている docs/ の文書から当たりを付ける。
+- 報告は結論を先に、関係するファイルを `パス:行番号` で挙げ、役割を1行ずつ添える。
+- ファイルの中身を長く貼らない。必要な数行だけ引用する。
+- 分からなかったことは「分からなかった」と書く。推測には推測と書く。
+````
+
+`.claude/agents/grep.md`
+
+````markdown
+---
+name: grep
+description: 関数・型・設定キー・文字列の呼び出し箇所や使われている場所を全部見つける。名前が分かっているものの検索に使う。
+tools: Grep, Glob, Read
+model: haiku
+---
+
+渡された名前の定義と、使っている箇所を漏れなく見つける。
+
+- 別名での import、文字列での参照、テスト、スクリプト、ドキュメントも探す。
+- 結果は `パス:行番号` とその1行だけを、定義・呼び出し・テスト・その他に分けて並べる。
+- 件数を最後に書く。見つからなければ、試した検索語を書く。
+- 解釈や修正案は書かない。
+````
+
+`.claude/agents/audit.md`
+
+````markdown
+---
+name: audit
+description: 作業ブランチの diff を使い捨ての worktree で確認する。コミット済みの変更のレビューと、ビルド・テストの実行に使う。
+tools: Read, Grep, Glob, Bash
+model: haiku
+isolation: worktree
+---
+
+使い捨ての worktree の中で、渡されたブランチの変更を確認する。
+
+- worktree は既定のブランチから作られる。最初に `git diff origin/main...<渡されたブランチ>` で差分を読み、
+  テストを頼まれたら `git checkout --detach <渡されたブランチ>` してから実行する。
+- 見るのはコミット済みの変更だけ。呼び出し元の未コミットの変更は見えない。
+- ビルド・テストを頼まれたら `npm ci` のあとに実行し、失敗したテスト名とエラーの要点だけを返す。
+- ファイルを編集しない。コミット・push・ブランチの作成や削除をしない。
+- 報告は 重大な問題／気になる点／問題なし の順。それぞれ `パス:行番号` と理由を1〜2行で。
+- CLAUDE.md の決まりに反する変更があれば必ず挙げる。
+````
+
+注意:
+- `settings.json` のモデルとアドバイザーが効くのは、手元の Claude Code と、リポジトリ1つで開いたクラウドのセッション。
+- アドバイザーは実験的な機能で、いつ相談するかは Claude が決める。
+- audit は使い捨ての worktree で動くので作業ブランチに影響しない。見えるのはコミット済みの変更だけで、テストの前に `npm ci` が要る。
+- 項目名の出典: https://code.claude.com/docs/en/sub-agents ／ https://code.claude.com/docs/en/advisor
 
 ---
 
